@@ -32,9 +32,15 @@ RUN /opt/conda/bin/conda install -c conda-forge pdal python-pdal -y && \
 RUN ln -s /opt/conda/bin/pdal /usr/local/bin/pdal
 
 # Install MinIO Client
-RUN curl https://dl.min.io/client/mc/release/linux-amd64/mc \
-  -o /usr/local/bin/mc && \
-  chmod +x /usr/local/bin/mc
+ARG TARGETARCH
+RUN case "${TARGETARCH:-amd64}" in \
+      amd64) MC_ARCH="amd64" ;; \
+      arm64) MC_ARCH="arm64" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    curl -fsSL "https://dl.min.io/client/mc/release/linux-${MC_ARCH}/mc" -o /usr/local/bin/mc && \
+    chmod +x /usr/local/bin/mc && \
+    /usr/local/bin/mc --version
 
 # Install tippecanoe
 RUN apt-get update && \
