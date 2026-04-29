@@ -13,7 +13,8 @@ RUN apt-get update && \
         ca-certificates \
         jq \
         curl \
-        libc6 
+        libc6 \
+        postgresql-client
 
 # Install Miniconda and PDAL
 RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
