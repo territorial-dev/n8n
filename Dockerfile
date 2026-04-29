@@ -3,11 +3,11 @@ FROM qgis/qgis:3.44.7-noble AS builder
 
 # Install fonts
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends gnupg && \
+    apt-get install -y --no-install-recommends gnupg ca-certificates curl && \
     install -d -m 0755 /etc/apt/keyrings && \
-    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/keyrings/postgresql.gpg && \
+    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor --batch --yes -o /etc/apt/keyrings/postgresql.gpg && \
     chmod a+r /etc/apt/keyrings/postgresql.gpg && \
-    echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt noble-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
+    echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
     apt-get update && \
     apt-get install -y --no-install-recommends \
         fontconfig \
