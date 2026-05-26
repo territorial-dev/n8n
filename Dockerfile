@@ -95,6 +95,21 @@ RUN curl -fsSL https://downloads.rapidlasso.de/LAStools.tar.gz -o /tmp/LAStools.
     rm -rf /tmp/LAStools.tar.gz && \
     rm -rf /tmp/LAStools
 
+# Install pmtiles Python package
+RUN /opt/conda/bin/pip install pmtiles
+
+# Install pmtiles CLI
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+        amd64) PMTILES_ARCH="x86_64" ;; \
+        arm64) PMTILES_ARCH="arm64" ;; \
+        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac && \
+    PMTILES_VERSION=$(curl -s https://api.github.com/repos/protomaps/go-pmtiles/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/') && \
+    curl -L "https://github.com/protomaps/go-pmtiles/releases/download/v${PMTILES_VERSION}/go-pmtiles_${PMTILES_VERSION}_Linux_${PMTILES_ARCH}.tar.gz" -o /tmp/pmtiles.tar.gz && \
+    tar -xzf /tmp/pmtiles.tar.gz -C /usr/local/bin pmtiles && \
+    rm /tmp/pmtiles.tar.gz
+
 # Install n8n globally - update versions as needed
 RUN npm install -g n8n@1.123.0
 
