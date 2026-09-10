@@ -111,7 +111,14 @@ RUN ARCH=$(dpkg --print-architecture) && \
     rm /tmp/pmtiles.tar.gz
 
 # Install n8n globally - pinned to latest 2.x release (n8n 2.0 breaking changes: https://docs.n8n.io/2-0-breaking-changes/)
-RUN npm install -g n8n@2.38.6
+# n8n 2.x compiles isolated-vm (native addon) via node-gyp at install time — build-essential
+# was already removed after the tippecanoe build above, so bring it back just for this step.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends build-essential python3-dev && \
+    npm install -g n8n@2.38.6 && \
+    apt-get remove -y build-essential python3-dev && \
+    apt-get autoremove -y && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # n8n 2.0 defaults changed and would otherwise break this image's geospatial workflows.
 # This mirrors the proven "V2 COMPAT MODE" block from the skyport2 n8n@2 deployment
