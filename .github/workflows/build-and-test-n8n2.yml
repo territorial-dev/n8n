@@ -1,0 +1,123 @@
+name: Build and Test (n8n@2)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile.n8n@2"
+      - ".github/workflows/build-and-test-n8n2.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "Dockerfile.n8n@2"
+      - ".github/workflows/build-and-test-n8n2.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: paschendale/n8n-geospatial
+          flavor: |
+            prefix=n8n2-
+            onlatest=true
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=sha-
+            type=raw,value=test,enable={{is_default_branch}}
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.n8n@2
+          platforms: linux/amd64
+          push: true
+          tags: paschendale/n8n-geospatial:n8n2-test
+          cache-from: |
+            type=registry,ref=paschendale/n8n-geospatial:n8n2-buildcache
+            type=gha
+          cache-to: |
+            type=gha,mode=max
+            type=registry,ref=paschendale/n8n-geospatial:n8n2-buildcache,mode=max
+
+      - name: Start container for testing
+        run: |
+          docker run -d --name n8n2-test -p 5678:5678 \
+            -e N8N_ENCRYPTION_KEY=test-key \
+            paschendale/n8n-geospatial:n8n2-test
+          sleep 30  # Wait for n8n to start
+
+      - name: Test n8n version and accessibility
+        run: |
+          docker exec n8n2-test n8n --version
+          curl -f http://localhost:5678 || exit 1
+          echo "n8n is accessible at http://localhost:5678"
+
+      - name: Test QGIS accessibility
+        run: |
+          docker exec n8n2-test qgis --version
+          docker exec n8n2-test python3 -c "import qgis.core; print('QGIS Python bindings working')"
+
+      - name: Test GDAL accessibility
+        run: |
+          docker exec n8n2-test gdalinfo --version
+          docker exec n8n2-test python3 -c "from osgeo import gdal; print('GDAL Python bindings working')"
+
+      - name: Test PDAL accessibility
+        run: |
+          docker exec n8n2-test pdal --version
+
+      - name: Test tippecanoe accessibility
+        run: |
+          docker exec n8n2-test tippecanoe --version
+
+      - name: Test MinIO Client accessibility
+        run: |
+          docker exec n8n2-test mc --version
+
+      - name: Test lastools accessibility
+        run: |
+          docker exec n8n2-test lasinfo64 -h
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker stop n8n2-test || true
+          docker rm n8n2-test || true
+
+      - name: Push to registry (on main)
+        if: github.ref == 'refs/heads/main' && success()
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.n8n@2
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: |
+            type=registry,ref=paschendale/n8n-geospatial:n8n2-buildcache
+            type=gha
+          cache-to: |
+            type=gha,mode=max
+            type=registry,ref=paschendale/n8n-geospatial:n8n2-buildcache,mode=max

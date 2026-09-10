@@ -1,0 +1,140 @@
+# 1. Use a builder step to download various dependencies
+FROM qgis/qgis:3.44.7-noble AS builder
+
+# Install fonts
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gnupg ca-certificates curl && \
+    install -d -m 0755 /etc/apt/keyrings && \
+    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor --batch --yes -o /etc/apt/keyrings/postgresql.gpg && \
+    chmod a+r /etc/apt/keyrings/postgresql.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        fontconfig \
+        git \
+        openssh-client \
+        graphicsmagick \
+        tini \
+        tzdata \
+        ca-certificates \
+        jq \
+        curl \
+        libc6 \
+        postgresql-client-17
+
+# Install Miniconda and PDAL
+RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
+    bash /tmp/miniconda.sh -b -p /opt/conda 
+
+# Accept Conda ToS
+RUN /opt/conda/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+    /opt/conda/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r 
+
+# Install PDAL
+RUN /opt/conda/bin/conda install -c conda-forge pdal python-pdal -y && \
+    /opt/conda/bin/conda clean -afy
+
+# Expose only the PDAL CLI, not Conda's Python
+RUN ln -s /opt/conda/bin/pdal /usr/local/bin/pdal
+
+# Install MinIO Client
+ARG TARGETARCH
+RUN case "${TARGETARCH:-amd64}" in \
+      amd64) MC_ARCH="amd64" ;; \
+      arm64) MC_ARCH="arm64" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    curl -fsSL "https://dl.min.io/client/mc/release/linux-${MC_ARCH}/mc" -o /usr/local/bin/mc && \
+    chmod +x /usr/local/bin/mc && \
+    /usr/local/bin/mc --version
+
+# Install tippecanoe
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        libsqlite3-dev \
+        zlib1g-dev && \
+    git clone https://github.com/mapbox/tippecanoe.git /tmp/tippecanoe && \
+    cd /tmp/tippecanoe && \
+    make -j && \
+    make install && \
+    cd / && \
+    rm -rf /tmp/tippecanoe && \
+    apt-get remove -y build-essential && \
+    apt-get autoremove -y && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js (n8n 2.x requires Node >=20.19; use 22.x LTS for headroom)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+    apt-get install -y nodejs
+
+# Install lastools
+RUN apt-get install -y --no-install-recommends \
+        libjpeg62 \
+        libpng-dev \
+        libtiff-dev \
+        libjpeg-dev \
+        libz-dev \
+        libproj-dev \
+        liblzma-dev \
+        libjbig-dev \
+        libzstd-dev \
+        libgeotiff-dev \
+        libwebp-dev \
+        liblzma-dev && \
+    fc-cache -f && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+## For some reason libjpeg62 is not installed by default, so we need to create a symlink
+RUN ln -s /usr/local/bin/lib/libjpeg.so.62 /usr/lib/libjpeg.so.62
+
+RUN curl -fsSL https://downloads.rapidlasso.de/LAStools.tar.gz -o /tmp/LAStools.tar.gz && \
+    mkdir -p /tmp/LAStools && \
+    tar -xzf /tmp/LAStools.tar.gz -C /tmp/LAStools && \
+    mv /tmp/LAStools/bin/* /usr/local/bin/ && \
+    rm -rf /tmp/LAStools.tar.gz && \
+    rm -rf /tmp/LAStools
+
+# Install pmtiles Python package
+RUN /opt/conda/bin/pip install pmtiles
+
+# Install pmtiles CLI
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+        amd64) PMTILES_ARCH="x86_64" ;; \
+        arm64) PMTILES_ARCH="arm64" ;; \
+        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac && \
+    PMTILES_VERSION=$(curl -s https://api.github.com/repos/protomaps/go-pmtiles/releases/latest | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/') && \
+    curl -L "https://github.com/protomaps/go-pmtiles/releases/download/v${PMTILES_VERSION}/go-pmtiles_${PMTILES_VERSION}_Linux_${PMTILES_ARCH}.tar.gz" -o /tmp/pmtiles.tar.gz && \
+    tar -xzf /tmp/pmtiles.tar.gz -C /usr/local/bin pmtiles && \
+    rm /tmp/pmtiles.tar.gz
+
+# Install n8n globally - pinned to latest 2.x release (n8n 2.0 breaking changes: https://docs.n8n.io/2-0-breaking-changes/)
+RUN npm install -g n8n@2.38.6
+
+# n8n 2.0 defaults changed and would otherwise break this image's geospatial workflows.
+# This mirrors the proven "V2 COMPAT MODE" block from the skyport2 n8n@2 deployment
+# (skyforest-infra/skyport2.yml), which runs the same kind of QGIS/GDAL/tippecanoe-via-
+# Execute-Command setup as this image:
+# - Task runners fully disabled (not just internal mode) so Code/Execute Command nodes run
+#   in-process against this container's own filesystem and Python env, same as pre-2.0 —
+#   the new sandboxed Python task runner does not inherit /opt/conda's PYTHONPATH, so
+#   qgis.core/osgeo imports would break under it.
+# - Execute Command / Local File Trigger nodes are disabled by default in 2.0; this repo's
+#   whole point is calling tippecanoe/mc/lastools/qgis CLI tools via Execute Command.
+# - Code nodes can no longer read process.env or the filesystem by default; re-enable both
+#   since workflows may rely on env-based config (e.g. MinIO credentials) and mounted
+#   input/output volumes.
+ENV N8N_RUNNERS_ENABLED=false \
+    N8N_ENABLE_EXECUTE_COMMAND=true \
+    NODES_EXCLUDE=[] \
+    N8N_BLOCK_ENV_ACCESS_IN_NODE=false \
+    N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES=false \
+    N8N_RESTRICT_FILE_ACCESS_TO=/ \
+    NODE_FUNCTION_ALLOW_EXTERNAL=node-fetch,fs,fs-extra \
+    N8N_RUN_MIGRATIONS=true 
+
+EXPOSE 5678/tcp
+
+ENTRYPOINT ["tini", "--", "n8n", "start"]

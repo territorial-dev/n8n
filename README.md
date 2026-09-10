@@ -181,6 +181,49 @@ docker-compose build --no-cache
 docker-compose up -d
 ```
 
+## n8n 2.x test image
+
+`Dockerfile.n8n@2` is a parallel build for trying n8n 2.x before it replaces the pinned 1.x version above. Same geospatial toolchain (QGIS, GDAL, PDAL, Tippecanoe, LAStools, MinIO Client, pmtiles) as the production `Dockerfile`, pinned to **n8n 2.38.6** (latest 2.x release at time of writing).
+
+### Building and running
+
+```bash
+docker build -f "Dockerfile.n8n@2" -t n8n-geospatial:n8n2-test .
+
+docker run -d \
+  --name n8n2-test \
+  -p 5679:5678 \
+  -v ./n8n-data:/home/node/.n8n \
+  n8n-geospatial:n8n2-test
+```
+
+Use a different host port so it can run alongside the v1 container.
+
+### Why it sets extra environment variables
+
+n8n 2.0 changed several security defaults that would otherwise break this image's Execute-Command-based geospatial workflows. `Dockerfile.n8n@2` bakes in the following compatibility flags, mirrored from a known-working n8n 2.9.1 production deployment (skyforest-infra's `skyport2.yml`) that runs the same kind of QGIS/GDAL/Tippecanoe-via-Execute-Command setup:
+
+| Variable | Value | Why |
+| --- | --- | --- |
+| `N8N_RUNNERS_ENABLED` | `false` | Disables the new sandboxed task runners so Code/Execute Command nodes keep running in-process against this container's own filesystem and Python env — the sandboxed Python runner doesn't inherit `/opt/conda`'s `PYTHONPATH`, so `qgis.core`/`osgeo` imports would break under it |
+| `N8N_ENABLE_EXECUTE_COMMAND` | `true` | The Execute Command node is disabled by default in 2.0; this repo's workflows call `tippecanoe`/`mc`/`lastools`/`qgis` CLIs through it |
+| `NODES_EXCLUDE` | `[]` | Also needed to re-enable Execute Command and Local File Trigger, which are excluded by default in 2.0 |
+| `N8N_BLOCK_ENV_ACCESS_IN_NODE` | `false` | Restores Code node access to `process.env` (e.g. MinIO credentials) |
+| `N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES` / `N8N_RESTRICT_FILE_ACCESS_TO` | `false` / `/` | Together, stop 2.0's file-access lockdown from blocking reads/writes to mounted input/output volumes |
+| `NODE_FUNCTION_ALLOW_EXTERNAL` | `node-fetch,fs,fs-extra` | Whitelists npm packages commonly needed inside Code nodes |
+| `N8N_RUN_MIGRATIONS` | `true` | Runs database migrations automatically on startup |
+
+### CI
+
+`.github/workflows/build-and-test-n8n2.yml` builds and smoke-tests this image on push/PR touching the Dockerfile, and on manual dispatch. Images are pushed to the same `paschendale/n8n-geospatial` Docker Hub repo under `n8n2-`-prefixed tags (`n8n2-test`, `n8n2-sha-...`) so they don't collide with the production `latest`/`test` tags.
+
+### Upgrading
+
+```dockerfile
+# In Dockerfile.n8n@2
+RUN npm install -g n8n@2.38.6  # Change version here
+```
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) file for details.

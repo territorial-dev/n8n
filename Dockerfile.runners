@@ -1,0 +1,182 @@
+ARG N8N_VERSION=1.123.0
+ARG NODE_VERSION=22.21.1
+ARG PYTHON_VERSION=3.13
+ARG QGIS_VERSION=3.44.2
+ARG TARGETPLATFORM=linux/amd64
+
+# ==============================================================================
+# STAGE 1: Extract runners from official n8n runners image
+# ==============================================================================
+FROM n8nio/task-runners:${N8N_VERSION} AS runners-source
+
+# ==============================================================================
+# STAGE 2: Geospatial tools builder
+# ==============================================================================
+FROM qgis/qgis:${QGIS_VERSION}-bookworm AS geospatial-builder
+
+# Install fonts and base dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        fontconfig \
+        git \
+        openssh-client \
+        graphicsmagick \
+        tzdata \
+        ca-certificates \
+        jq \
+        curl \
+        wget \
+        libc6 \
+        build-essential \
+        libsqlite3-dev \
+        zlib1g-dev \
+        python3-pip \
+        python3-dev && \
+    fc-cache -f && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install Miniconda and PDAL
+RUN wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
+    bash /tmp/miniconda.sh -b -p /opt/conda
+
+# Accept Conda ToS
+RUN /opt/conda/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+    /opt/conda/bin/conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+
+# Install PDAL
+RUN /opt/conda/bin/conda install -c conda-forge pdal python-pdal -y && \
+    /opt/conda/bin/conda clean -afy
+
+# Expose only the PDAL CLI, not Conda's Python
+RUN ln -s /opt/conda/bin/pdal /usr/local/bin/pdal
+
+# Install MinIO Client
+RUN curl https://dl.min.io/client/mc/release/linux-amd64/mc \
+    -o /usr/local/bin/mc && \
+    chmod +x /usr/local/bin/mc
+
+# Install tippecanoe
+RUN git clone https://github.com/mapbox/tippecanoe.git /tmp/tippecanoe && \
+    cd /tmp/tippecanoe && \
+    make -j && \
+    make install && \
+    cd / && \
+    rm -rf /tmp/tippecanoe && \
+    apt-get remove -y build-essential && \
+    apt-get autoremove -y && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# ==============================================================================
+# STAGE 3: Node.js and Python setup
+# ==============================================================================
+FROM python:${PYTHON_VERSION}-bookworm AS python-base
+
+# Install Node.js
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    corepack enable pnpm
+
+# ==============================================================================
+# STAGE 4: Task Runner Launcher download
+# ==============================================================================
+FROM debian:bookworm-slim AS launcher-downloader
+ARG TARGETPLATFORM
+ARG LAUNCHER_VERSION=1.4.2
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends wget ca-certificates && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN set -e; \
+    case "$TARGETPLATFORM" in \
+        "linux/amd64") ARCH_NAME="amd64" ;; \
+        "linux/arm64") ARCH_NAME="arm64" ;; \
+        *) echo "Unsupported platform: $TARGETPLATFORM" && exit 1 ;; \
+    esac; \
+    mkdir /launcher-temp && cd /launcher-temp; \
+    wget -q "https://github.com/n8n-io/task-runner-launcher/releases/download/${LAUNCHER_VERSION}/task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz"; \
+    wget -q "https://github.com/n8n-io/task-runner-launcher/releases/download/${LAUNCHER_VERSION}/task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz.sha256"; \
+    echo "$(cat task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz.sha256) task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz" > checksum.sha256; \
+    sha256sum -c checksum.sha256; \
+    mkdir -p /launcher-bin; \
+    tar xzf task-runner-launcher-${LAUNCHER_VERSION}-linux-${ARCH_NAME}.tar.gz -C /launcher-bin; \
+    cd / && rm -rf /launcher-temp
+
+# ==============================================================================
+# STAGE 5: Runtime - Combine everything
+# ==============================================================================
+FROM qgis/qgis:${QGIS_VERSION}-bookworm AS runtime
+
+ARG N8N_VERSION=snapshot
+ARG N8N_RELEASE_TYPE=dev
+
+ENV NODE_ENV=production \
+    N8N_RELEASE_TYPE=${N8N_RELEASE_TYPE} \
+    SHELL=/bin/bash \
+    LD_LIBRARY_PATH=/opt/conda/lib:/usr/local/lib:${LD_LIBRARY_PATH} \
+    PATH=/opt/conda/bin:/usr/local/bin:/usr/bin:/bin:${PATH}
+
+# Install base dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        fontconfig \
+        git \
+        openssh-client \
+        graphicsmagick \
+        tini \
+        tzdata \
+        ca-certificates \
+        jq \
+        curl \
+        wget \
+        libc6 \
+        libstdc++6 \
+        python3-pip \
+        python3-dev && \
+    fc-cache -f && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install Node.js and pnpm
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs && \
+    corepack enable pnpm
+
+# Copy runners from official image
+COPY --from=runners-source --chown=root:root /opt/runners /opt/runners
+COPY --from=runners-source --chown=root:root /usr/local/bin/task-runner-launcher /usr/local/bin/task-runner-launcher
+COPY --from=runners-source --chown=root:root /etc/n8n-task-runners.json /etc/n8n-task-runners.json
+
+# Copy launcher (backup in case it's not in runners-source)
+COPY --from=launcher-downloader /launcher-bin/* /usr/local/bin/
+
+# Copy geospatial tools
+COPY --from=geospatial-builder /opt/conda /opt/conda
+COPY --from=geospatial-builder /usr/local/bin/pdal /usr/local/bin/pdal
+COPY --from=geospatial-builder /usr/local/bin/mc /usr/local/bin/mc
+COPY --from=geospatial-builder /usr/local/bin/tippecanoe* /usr/local/bin/
+
+# Ensure PDAL is accessible
+RUN ln -sf /opt/conda/bin/pdal /usr/local/bin/pdal || true
+
+# Set PYTHONPATH to include system and conda Python packages
+# Python will search all paths, so including multiple versions is fine
+ENV PYTHONPATH=/usr/lib/python3/dist-packages:/opt/conda/lib/python3.13/site-packages:/opt/conda/lib/python3.12/site-packages:/opt/conda/lib/python3.11/site-packages:/opt/conda/lib/python3.10/site-packages
+
+# Create runner user (matching official image)
+RUN groupadd -g 1000 runner && \
+    useradd -u 1000 -g 1000 -d /home/runner -s /bin/bash -m runner
+
+WORKDIR /home/runner
+
+USER runner
+
+EXPOSE 5680/tcp
+
+ENTRYPOINT ["tini", "--", "/usr/local/bin/task-runner-launcher"]
+CMD ["javascript", "python"]
+
+LABEL org.opencontainers.image.title="n8n geospatial task runners" \
+      org.opencontainers.image.description="n8n task runners with geospatial capabilities (QGIS, GDAL, PDAL, Tippecanoe)" \
+      org.opencontainers.image.source="https://github.com/n8n-io/n8n" \
+      org.opencontainers.image.url="https://n8n.io" \
+      org.opencontainers.image.version="${N8N_VERSION}"
