@@ -64,8 +64,9 @@ RUN apt-get update && \
     apt-get autoremove -y && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js (n8n 2.x requires Node >=20.19; use 22.x LTS for headroom)
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+# Install Node.js (n8n 2.38.x requires Node >=24.0.0 — confirmed at runtime: "Your Node.js
+# version 22.23.2 is currently not supported by n8n" against >=24.0.0)
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     apt-get install -y nodejs
 
 # Install lastools
