@@ -65,7 +65,20 @@ jobs:
           docker run -d --name n8n2-test -p 5678:5678 \
             -e N8N_ENCRYPTION_KEY=test-key \
             paschendale/n8n-geospatial:n8n2-test
-          sleep 30  # Wait for n8n to start
+
+          for i in $(seq 1 30); do
+            if [ "$(docker inspect -f '{{.State.Running}}' n8n2-test 2>/dev/null)" != "true" ]; then
+              echo "Container is not running (check $i) — dumping logs:"
+              docker logs n8n2-test || true
+              docker inspect n8n2-test --format 'ExitCode={{.State.ExitCode}} Error={{.State.Error}}' || true
+              exit 1
+            fi
+            echo "Container running, waiting for n8n to come up... ($i)"
+            sleep 2
+          done
+
+          echo "--- container logs ---"
+          docker logs n8n2-test || true
 
       - name: Test n8n version and accessibility
         run: |
